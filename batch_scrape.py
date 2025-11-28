@@ -82,18 +82,14 @@ def run_scraper(start_date, end_date, headless=True):
         raise
 
 def main():
-    """Run batch scraping for all of 2025"""
+    """Run batch scraping for all of 2024"""
     
-    # Determine current month for end range
-    now = datetime.now()
-    end_month = now.month if now.year == 2025 else 12
-    
-    print(f"🚀 Starting batch scrape: January 2025 - {datetime(2025, end_month, 1).strftime('%B %Y')}")
+    print(f"🚀 Starting batch scrape: January 2024 - December 2024")
     print("   Running in headless mode for speed")
     print("   Database will automatically handle duplicates\n")
     
-    # Generate monthly ranges for 2025 (Jan through current month)
-    ranges = get_month_ranges(2025, 1, 2025, end_month)
+    # Generate monthly ranges for 2024 (all 12 months)
+    ranges = get_month_ranges(2024, 1, 2024, 12)
     
     total = len(ranges)
     success = 0

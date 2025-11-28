@@ -46,6 +46,7 @@ KEYWORD_MAP = {
     "Power Zone Max": ["Power Zone Max"],
     "Power Zone": ["Power Zone"],  # Will later exclude Endurance/Max if explicitly Power Zone
     "FTP Test": ["FTP Test"],
+    "FTP Warm Up": ["FTP Warm"],
     "Low Impact": ["Low Impact"],
     "Ride": ["Ride"],  # Generic celebration ride
 }
@@ -85,16 +86,23 @@ def instructor_list(pref: str):
         return []
     return [p.strip() for p in pref.split(',') if p.strip()]
 
-def fetch_candidate(conn, template_type, duration_min, intensity_min, intensity_max, instructors, allow_fallback):
-    """Attempt to find a matching class according to layered fallback strategy."""
+def fetch_candidate(conn, template_type, duration_min, intensity_min, intensity_max, instructors, allow_fallback, prefer_instructor=None):
+    """Attempt to find a matching class according to layered fallback strategy.
+    
+    If prefer_instructor is provided, it will be strongly preferred in the query.
+    """
     cur = conn.cursor()
     base_keywords = KEYWORD_MAP.get(template_type, [])
     # Special case: plain Power Zone should exclude Endurance/Max variants
     excludes = EXCLUDE_SUBSTRINGS_FOR_PURE_POWER_ZONE if template_type == "Power Zone" else []
 
-    def run_query(duration_window, rating_window, restrict_instructors, allow_loose_title=False):
+    def run_query(duration_window, rating_window, restrict_instructors, allow_loose_title=False, force_instructor=None):
         params = []
         where = ["difficulty_rating IS NOT NULL"]
+        # Force specific instructor if requested
+        if force_instructor:
+            where.append("instructor = ?")
+            params.append(force_instructor)
         # Duration filter
         if duration_window:
             low, high = duration_window
@@ -105,8 +113,8 @@ def fetch_candidate(conn, template_type, duration_min, intensity_min, intensity_
             rlow, rhigh = rating_window
             where.append("difficulty_rating BETWEEN ? AND ?")
             params.extend([rlow, rhigh])
-        # Instructor preference
-        if restrict_instructors and instructors:
+        # Instructor preference (only if not forcing)
+        if restrict_instructors and instructors and not force_instructor:
             placeholders = ",".join(["?" for _ in instructors])
             where.append(f"instructor IN ({placeholders})")
             params.extend(instructors)
@@ -137,6 +145,19 @@ def fetch_candidate(conn, template_type, duration_min, intensity_min, intensity_
     # Strategy layers
     rating_window = (intensity_min, intensity_max) if intensity_max > 0 else None
     duration_window = (duration_min, duration_min) if duration_min > 0 else None
+    
+    # 0. If prefer_instructor is set, try that first with wide parameters
+    if prefer_instructor:
+        candidate = run_query(
+            (max(1, duration_min - 15), duration_min + 15) if duration_min > 0 else None,
+            (max(0, intensity_min - 2), min(10, intensity_max + 2)) if rating_window else None,
+            False,
+            allow_loose_title=True,
+            force_instructor=prefer_instructor
+        )
+        if candidate:
+            return candidate
+    
     # 1. Strict all filters with instructor preference
     candidate = run_query(duration_window, rating_window, True)
     if candidate:
@@ -167,6 +188,42 @@ def fetch_candidate(conn, template_type, duration_min, intensity_min, intensity_
     candidate = run_query((max(1, duration_min - 15), duration_min + 15), None, False, allow_loose_title=True)
     return candidate
 
+def fetch_matched_warmup_for_test(conn, test_class):
+    """Find the matched FTP Warm Up: same instructor and same calendar day as the FTP Test."""
+    if not test_class:
+        return None
+    class_id, title, instructor, dur, rating, url, air_time = test_class
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id,title,instructor,duration_minutes,difficulty_rating,url,original_air_time
+        FROM classes
+        WHERE instructor = ?
+          AND DATE(original_air_time) = DATE(?)
+          AND (title LIKE '%FTP Warm%' OR title LIKE '%Warm Up%')
+        ORDER BY duration_minutes ASC
+        LIMIT 1
+        """,
+        (instructor, air_time)
+    )
+    warm = cur.fetchone()
+    if warm:
+        return warm
+    # Fallback: any warm-up by same instructor within +/-1 day
+    cur.execute(
+        """
+        SELECT id,title,instructor,duration_minutes,difficulty_rating,url,original_air_time
+        FROM classes
+        WHERE instructor = ?
+          AND (title LIKE '%FTP Warm%' OR title LIKE '%Warm Up%')
+          AND DATE(original_air_time) BETWEEN DATE(?,'-1 day') AND DATE(?,'+1 day')
+        ORDER BY ABS(strftime('%s', original_air_time) - strftime('%s', ?)) ASC
+        LIMIT 1
+        """,
+        (instructor, air_time, air_time, air_time)
+    )
+    return cur.fetchone()
+
 def generate_plan(args):
     template_rows = parse_template(args.template)
     start_date = datetime.strptime(args.start_date, "%Y-%m-%d") if args.start_date else next_monday()
@@ -177,7 +234,25 @@ def generate_plan(args):
         raise SystemExit(f"Database not found at {db_path}. Run refresh_cache.py first.")
     conn = sqlite3.connect(db_path)
 
+    # Instructor caps for diversity
+    INSTRUCTOR_LIMITS = {
+        "CHRISTINE D'ERCOLE": 2,
+        "ERIK JÄGER": 5,
+        "CHARLOTTE WEIDENBACH": 5,
+    }
+    
+    # Ensure these instructors appear at least once
+    MUST_INCLUDE = {
+        "OLIVIA AMATO",
+        "TUNDE OYENEYIN",
+        "HANNAH FRANKSON",
+        "BEN ALLDIS",
+        "SAM YO",
+    }
+    
     used_ids = set()
+    instructor_counts = {}
+    included_instructors = set()
     output_rows = []
     unmatched = 0
 
@@ -196,12 +271,34 @@ def generate_plan(args):
             ])
             continue
 
-        candidate = fetch_candidate(conn, tpl_type, duration, imin, imax, instructors, args.allow_fallback)
-        # Avoid duplicates by retrying a few times
+        # Check if we need to force a must-include instructor
+        missing_instructors = MUST_INCLUDE - included_instructors
+        prefer_instructor = None
+        if missing_instructors and len(output_rows) > len(template_rows) - 10:
+            # If we're near the end and still missing instructors, force one
+            prefer_instructor = missing_instructors.pop()
+            missing_instructors.add(prefer_instructor)  # Put it back temporarily
+
+        # First select the primary candidate (including FTP Test)
+        candidate = fetch_candidate(conn, tpl_type, duration, imin, imax, instructors, args.allow_fallback, prefer_instructor=prefer_instructor)
+        # Avoid duplicates and enforce instructor caps by retrying
         retry = 0
-        while candidate and candidate[0] in used_ids and retry < 5:
-            candidate = fetch_candidate(conn, tpl_type, duration, imin, imax, instructors, args.allow_fallback)
-            retry += 1
+        while candidate and retry < 10:
+            class_id, title, instructor, dur, rating, url, air_time = candidate
+            # Check if already used
+            if class_id in used_ids:
+                candidate = fetch_candidate(conn, tpl_type, duration, imin, imax, instructors, args.allow_fallback, prefer_instructor=prefer_instructor)
+                retry += 1
+                continue
+            # Check instructor limit
+            current_count = instructor_counts.get(instructor, 0)
+            limit = INSTRUCTOR_LIMITS.get(instructor, 999)  # Default: no limit
+            if current_count >= limit:
+                candidate = fetch_candidate(conn, tpl_type, duration, imin, imax, instructors, args.allow_fallback, prefer_instructor=prefer_instructor)
+                retry += 1
+                continue
+            # Valid candidate
+            break
 
         if not candidate or candidate[0] in used_ids:
             unmatched += 1
@@ -213,6 +310,24 @@ def generate_plan(args):
 
         class_id, title, instructor, dur, rating, url, air_time = candidate
         used_ids.add(class_id)
+        instructor_counts[instructor] = instructor_counts.get(instructor, 0) + 1
+        included_instructors.add(instructor)
+        # If FTP Test, insert matched Warm Up (same instructor/date) immediately before
+        if tpl_type == "FTP Test":
+            warm = fetch_matched_warmup_for_test(conn, candidate)
+            if warm:
+                w_id, w_title, w_instructor, w_dur, w_rating, w_url, w_air = warm
+                if (
+                    w_id not in used_ids and
+                    instructor_counts.get(w_instructor, 0) < INSTRUCTOR_LIMITS.get(w_instructor, 999)
+                ):
+                    used_ids.add(w_id)
+                    instructor_counts[w_instructor] = instructor_counts.get(w_instructor, 0) + 1
+                    included_instructors.add(w_instructor)
+                    output_rows.append([
+                        row["Week"], ride_date.strftime("%Y-%m-%d"), row["Phase"], row["Day"], "FTP Warm Up",
+                        w_id, w_title, w_instructor, str(w_dur), f"{imin}", f"{imax}", f"{w_rating}", w_url, "Matched warm-up"
+                    ])
         output_rows.append([
             row["Week"], ride_date.strftime("%Y-%m-%d"), row["Phase"], row["Day"], tpl_type,
             class_id, title, instructor, str(dur), f"{imin}", f"{imax}", f"{rating}", url, notes
@@ -223,7 +338,15 @@ def generate_plan(args):
     out_dir = Path("output")
     out_dir.mkdir(exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d-%H%M")
-    out_path = out_dir / f"training-plan-{ts}.csv"
+    # Derive plan name from template filename, removing the word 'template'
+    tpl_path = Path(args.template)
+    base_name = tpl_path.stem  # e.g., '8-week-A-template'
+    # Remove 'template' (case-insensitive) and cleanup dashes/underscores
+    cleaned = base_name.replace('template', '').replace('Template', '')
+    cleaned = cleaned.strip('-_ ')
+    if not cleaned:
+        cleaned = 'plan'
+    out_path = out_dir / f"{cleaned}-{ts}.csv"
     with open(out_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow([
@@ -233,16 +356,27 @@ def generate_plan(args):
 
     print(f"\n[PLAN] Generated plan saved to {out_path}")
     print(f"[PLAN] Total rows: {len(output_rows)} | Unmatched: {unmatched}")
+    
+    # Check if all must-include instructors are present
+    missing = MUST_INCLUDE - included_instructors
+    if missing:
+        print(f"[WARN] Missing required instructors: {', '.join(missing)}")
+    else:
+        print(f"[PLAN] ✓ All required instructors included")
+    
     if unmatched:
         print("[PLAN] Consider enabling --allow-fallback or broadening intensity ranges in template.")
 
 def main():
     parser = argparse.ArgumentParser(description="Generate a training plan from a template CSV (uses ALL classes)")
-    parser.add_argument("--template", default="input/8-week-plan.csv", help="Template CSV path")
+    parser.add_argument("--template", required=True, help="Template CSV path (required)")
     parser.add_argument("--start-date", help="Start date for Week 1 Day 1 (YYYY-MM-DD); default next Monday")
     parser.add_argument("--db-path", default=DEFAULT_DB, help="SQLite DB path")
     parser.add_argument("--allow-fallback", action="store_true", help="Enable broader fallback matching when strict match fails")
     args = parser.parse_args()
+    # Validate template path early with clearer error
+    if not os.path.exists(args.template):
+        raise SystemExit(f"Template not found: {args.template}. Provide a valid path, e.g., --template input/8-week-A-template.csv")
     generate_plan(args)
 
 if __name__ == "__main__":
