@@ -12,7 +12,11 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import StaleElementReferenceException, TimeoutException
+from selenium.common.exceptions import (
+    StaleElementReferenceException,
+    TimeoutException,
+    ElementClickInterceptedException,
+)
 from webdriver_manager.chrome import ChromeDriverManager
 
 DB_PATH = "peloton_classes.db"
@@ -205,20 +209,22 @@ def wait_for_modal_and_get(driver):
 
     # Duration: prefer explicit badge/pill; fallback to parse from title
     duration = None
+    import re
+    # Strategy 1: find dedicated badge/span
     try:
-        pill = driver.find_element(By.XPATH, "//span[contains(., 'min')]")
-        # Extract leading integer
-        import re
-        m = re.search(r"(\d{2,}|\d)\s*min", pill.text)
-        if m:
-            duration = int(m.group(1))
+        pill_candidates = driver.find_elements(By.XPATH, "//span[contains(translate(., 'MIN', 'min'), 'min')]")
+        for pill in pill_candidates:
+            m = re.search(r"(\d{1,3})\s*min", pill.text.lower())
+            if m:
+                duration = int(m.group(1))
+                break
     except Exception:
         pass
-    if duration is None:
-        try:
-            duration = int(title.split()[0])
-        except Exception:
-            duration = None
+    # Strategy 2: parse from title
+    if duration is None and title:
+        m = re.search(r"^(\d{1,3})\s+min", title.lower())
+        if m:
+            duration = int(m.group(1))
 
     # Difficulty rating: look for a decimal number element, legacy variants included
     rating = None
@@ -244,6 +250,60 @@ def wait_for_modal_and_get(driver):
     }
 
 def scrape_via_details_page(driver, class_id):
+    def modal_open(driver):
+        """Return True if a class details modal/overlay appears present."""
+        try:
+            driver.find_element(By.CSS_SELECTOR, "[data-test-id='classDetailsTitle']")
+            return True
+        except Exception:
+            return False
+
+    def close_modal(driver):
+        """Attempt multiple strategies to close the modal and remove overlay."""
+        strategies = []
+        # 1. Close button
+        strategies.append(lambda d: d.find_element(By.CSS_SELECTOR, "[data-test-id='closeModalButton']").click())
+        # 2. ESC key
+        strategies.append(lambda d: d.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE))
+        # 3. Click overlay
+        strategies.append(lambda d: d.find_element(By.CSS_SELECTOR, ".ReactModal__Overlay").click())
+        # 4. JS remove overlay
+        strategies.append(lambda d: d.execute_script("""
+            const ov=document.querySelector('.ReactModal__Overlay'); if(ov) ov.remove();
+            const title=document.querySelector('[data-test-id=classDetailsTitle]');
+            if(title){ const modal=title.closest('.ReactModal__Content'); if(modal) modal.remove(); }
+        """))
+        for strat in strategies:
+            try:
+                strat(driver)
+                time.sleep(0.3)
+                if not modal_open(driver):
+                    break
+            except Exception:
+                continue
+        # Final wait to ensure overlay gone
+        try:
+            WebDriverWait(driver, 3).until_not(
+                EC.presence_of_element_located((By.CSS_SELECTOR, ".ReactModal__Overlay"))
+            )
+        except Exception:
+            pass
+
+    def safe_click_tile(driver, tile):
+        """Click tile with retries, handling intercepted clicks from lingering modals."""
+        for attempt in range(3):
+            try:
+                tile.click()
+                return True
+            except ElementClickInterceptedException:
+                print(f"[WARN] Click intercepted (attempt {attempt+1}/3). Trying to close lingering modal...")
+                close_modal(driver)
+                time.sleep(0.5)
+            except Exception as e:
+                print(f"[WARN] Unexpected click failure: {e}")
+                close_modal(driver)
+                time.sleep(0.5)
+        return False
     """Fallback: open the class details modal via URL, then scrape it, closing afterward."""
     details_url = f"{BASE_URL}?modal=classDetailsModal&classId={class_id}"
     driver.execute_script("window.open(arguments[0])", details_url)
@@ -493,8 +553,16 @@ def extract_powerzone_classes(driver, max_classes=10, start_date=None, end_date=
             title = tile.find_element(By.CSS_SELECTOR, "[data-test-id='videoCellTitle']").text
             print(f"[INFO] Class title: {title}")
             
+            # Ensure previous modal is closed before clicking new tile
+            if modal_open(driver):
+                print("[INFO] Previous modal still open; closing before next click...")
+                close_modal(driver)
+
             # Click the tile to open details modal and use robust waits
-            tile.click()
+            if not safe_click_tile(driver, tile):
+                print("[ERROR] Could not click tile after retries; skipping tile.")
+                i += 1
+                continue
             print("[INFO] Clicked on class tile, waiting for modal...")
             modal_data = None
             try:
