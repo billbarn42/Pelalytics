@@ -51,6 +51,19 @@ python refresh_cache.py --start-date 2024-01-01 --end-date 2024-12-31
 ```
 
 ## Usage
+### Plan generation
+Use `generate_plan.py` to build a training plan CSV from a template in `input/`.
+
+Key behavior:
+- When a template row is `FTP Test`, the generator automatically inserts the matched `FTP Warm Up` on the same day, immediately before the test.
+- Matched warmup selection: same instructor and same date as the test; falls back to ±1 day if needed.
+- Template warmup rows are ignored (warmups are auto-managed).
+
+Example:
+```bash
+source venv/bin/activate
+python generate_plan.py --template input/8-week-A-template.csv --start-date 2025-11-28 --allow-fallback
+```
 
 ### Command-Line Options
 
@@ -187,7 +200,7 @@ python refresh_cache.py --start-date 2025-01-01 --end-date 2025-12-31 --headless
 # 2024
 python refresh_cache.py --start-date 2024-01-01 --end-date 2024-12-31 --headless
 
-# 2023
+# 2023 (also the default in batch_scrape.py)
 python refresh_cache.py --start-date 2023-01-01 --end-date 2023-12-31 --headless
 
 # Continue back as far as needed...

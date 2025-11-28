@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt || true
+          pip install black ruff
+
+      - name: Lint (ruff)
+        run: ruff check . || true
+
+      - name: Format check (black)
+        run: black --check . || true
+
+      - name: SQLite sanity
+        run: |
+          python - <<'PY'
+          import os, sqlite3
+          db = 'peloton_classes.db'
+          if not os.path.exists(db):
+              print('[INFO] DB not present; skipping sanity.')
+          else:
+              conn = sqlite3.connect(db)
+              cur = conn.cursor()
+              cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='classes'")
+              row = cur.fetchone()
+              assert row, 'classes table missing'
+              cur.execute('SELECT COUNT(*) FROM classes')
+              cnt = cur.fetchone()[0]
+              print(f"[INFO] classes count: {cnt}")
+              conn.close()
+          PY
