@@ -19,3 +19,12 @@ config.py
 # Operating system files
 .DS_Store
 Thumbs.db
+
+# Local database
+peloton_classes.db
+
+# Environment variables
+.env
+
+# Legacy embedded repo (keep local only)
+legacy/peloton_client_repo/
