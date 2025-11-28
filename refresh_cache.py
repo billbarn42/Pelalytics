@@ -458,6 +458,11 @@ def extract_powerzone_classes(driver, max_classes=10, start_date=None, end_date=
                 if oldest_first:
                     if end_date and class_date > end_date:
                         print(f"[INFO] Class date {class_date.strftime('%Y-%m-%d')} is after end date")
+                        if not found_range_start:
+                            # Overshot the end of range before entering it; back up
+                            print(f"[INFO] ⚠️ Overshot range (oldest-first). Backing up to enter range...")
+                            i = max(0, i - 20)
+                            continue
                         print(f"[INFO] Reached end of date range (oldest-first), stopping...")
                         break
                 else:
