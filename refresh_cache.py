@@ -12,6 +12,7 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import StaleElementReferenceException, TimeoutException
 from webdriver_manager.chrome import ChromeDriverManager
 
 DB_PATH = "peloton_classes.db"
@@ -184,6 +185,75 @@ def save_class_to_db(cls):
     print(f"[DB {action}] {cls['title']} | {cls['instructor']} | {cls['duration_minutes']} min | Rating: {cls['difficulty_rating']}")
     conn.commit()
     conn.close()
+
+def wait_for_modal_and_get(driver):
+    """Wait for class details modal to stabilize, then return fresh references.
+    Returns dict with title, instructor, duration, rating. Raises TimeoutException on failure.
+    """
+    WebDriverWait(driver, 12).until(
+        EC.presence_of_element_located((By.CSS_SELECTOR, "[data-test-id='classDetailsTitle']"))
+    )
+    # Re-find elements inside modal to avoid stale references
+    title = driver.find_element(By.CSS_SELECTOR, "[data-test-id='classDetailsTitle']").text.strip()
+    # Instructor line may be missing the dot separator for legacy classes
+    instructor = ""
+    try:
+        sub = driver.find_element(By.CSS_SELECTOR, "[data-test-id='classDetailsSubtitle']").text.strip()
+        instructor = sub.split('·')[0].strip() if '·' in sub else sub
+    except Exception:
+        instructor = ""
+
+    # Duration: prefer explicit badge/pill; fallback to parse from title
+    duration = None
+    try:
+        pill = driver.find_element(By.XPATH, "//span[contains(., 'min')]")
+        # Extract leading integer
+        import re
+        m = re.search(r"(\d{2,}|\d)\s*min", pill.text)
+        if m:
+            duration = int(m.group(1))
+    except Exception:
+        pass
+    if duration is None:
+        try:
+            duration = int(title.split()[0])
+        except Exception:
+            duration = None
+
+    # Difficulty rating: look for a decimal number element, legacy variants included
+    rating = None
+    try:
+        spans = driver.find_elements(By.TAG_NAME, "span")
+        for span in spans:
+            t = span.text.strip()
+            if t and '.' in t and '+' not in t:
+                try:
+                    val = float(t)
+                    if 0 <= val <= 10:
+                        rating = val
+                        break
+                except ValueError:
+                    continue
+    except Exception:
+        rating = None
+    return {
+        "title": title,
+        "instructor": instructor,
+        "duration": duration,
+        "rating": rating,
+    }
+
+def scrape_via_details_page(driver, class_id):
+    """Fallback: open the class details modal via URL, then scrape it, closing afterward."""
+    details_url = f"{BASE_URL}?modal=classDetailsModal&classId={class_id}"
+    driver.execute_script("window.open(arguments[0])", details_url)
+    driver.switch_to.window(driver.window_handles[-1])
+    try:
+        data = wait_for_modal_and_get(driver)
+        return data
+    finally:
+        driver.close()
+        driver.switch_to.window(driver.window_handles[0])
 
 def extract_powerzone_classes(driver, max_classes=10, start_date=None, end_date=None, oldest_first=False):
     """
@@ -418,19 +488,24 @@ def extract_powerzone_classes(driver, max_classes=10, start_date=None, end_date=
             title = tile.find_element(By.CSS_SELECTOR, "[data-test-id='videoCellTitle']").text
             print(f"[INFO] Class title: {title}")
             
-            # Click the tile to open details modal
+            # Click the tile to open details modal and use robust waits
             tile.click()
-            time.sleep(2)
             print("[INFO] Clicked on class tile, waiting for modal...")
-            
-            # Wait for modal to appear
-            WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "[data-test-id='classDetailsTitle']"))
-            )
+            modal_data = None
+            try:
+                modal_data = wait_for_modal_and_get(driver)
+            except (TimeoutException, StaleElementReferenceException):
+                print("[WARN] Modal elements not stable; attempting details-page fallback...")
             
             # Get the class URL (will include classId in query params)
             class_url = driver.current_url
             class_id = class_url.split("classId=")[-1].split("&")[0] if "classId=" in class_url else class_url.split("/")[-1]
+            if modal_data is None:
+                # Try scraping via details page as a fallback path
+                try:
+                    modal_data = scrape_via_details_page(driver, class_id)
+                except Exception as e:
+                    print(f"[ERROR] Details-page fallback failed: {e}")
             
             # Skip if already processed
             if class_id in processed_ids:
@@ -443,52 +518,23 @@ def extract_powerzone_classes(driver, max_classes=10, start_date=None, end_date=
             processed_ids.add(class_id)
             print(f"[INFO] Class URL: {class_url}")
             
-            # Extract class name from the details page
-            try:
-                title = driver.find_element(By.CSS_SELECTOR, "[data-test-id='classDetailsTitle']").text
+            # Use modal_data collected via robust path
+            title = modal_data.get("title") or title
+            instructor = modal_data.get("instructor", "")
+            duration = modal_data.get("duration")
+            rating = modal_data.get("rating")
+            if title:
                 print(f"[INFO] Class title from details page: {title}")
-            except Exception as e:
-                print(f"[WARN] Could not get title from details page, using tile title: {e}")
-            
-            # Extract duration from title (e.g., "45 min" from "45 min Power Zone Classic Rock Ride")
-            duration = None
-            try:
-                duration = int(title.split()[0])
+            if duration is not None:
                 print(f"[INFO] Duration: {duration} minutes")
-            except Exception as e:
-                print(f"[WARN] Could not extract duration from title: {e}")
-            
-            # Extract difficulty rating (look for a span with a decimal number)
-            rating = None
-            try:
-                # Find all span elements and look for one with a decimal rating
-                spans = driver.find_elements(By.TAG_NAME, "span")
-                for span in spans:
-                    text = span.text.strip()
-                    # Look for a decimal number between 0 and 10
-                    if text and '.' in text and '+' not in text:
-                        try:
-                            test_rating = float(text)
-                            if 0 <= test_rating <= 10:
-                                rating = test_rating
-                                print(f"[INFO] Difficulty rating: {rating}")
-                                break
-                        except ValueError:
-                            continue
-                
-                if rating is None:
-                    print(f"[WARN] Could not find difficulty rating element")
-            except Exception as e:
-                print(f"[WARN] Could not get difficulty rating: {e}")
-            
-            # Extract instructor name
-            instructor = ""
-            try:
-                instructor_elem = driver.find_element(By.CSS_SELECTOR, "[data-test-id='classDetailsSubtitle']")
-                instructor = instructor_elem.text.split('·')[0].strip()
+            else:
+                print("[WARN] Duration not found")
+            if rating is not None:
+                print(f"[INFO] Difficulty rating: {rating}")
+            else:
+                print("[WARN] Could not find difficulty rating element")
+            if instructor:
                 print(f"[INFO] Instructor: {instructor}")
-            except Exception as e:
-                print(f"[WARN] Could not get instructor: {e}")
             
             # Format air_time from class_date if available
             air_time = ""
@@ -518,6 +564,12 @@ def extract_powerzone_classes(driver, max_classes=10, start_date=None, end_date=
                 print("[INFO] Modal closed, moving to next class...")
             except Exception as e:
                 print(f"[WARN] Could not close modal: {e}")
+                # Fallback: press ESC
+                try:
+                    driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
+                    time.sleep(0.5)
+                except Exception:
+                    pass
             
         except Exception as e:
             error_msg = str(e)
@@ -551,8 +603,12 @@ def extract_powerzone_classes(driver, max_classes=10, start_date=None, end_date=
                 close_button = driver.find_element(By.CSS_SELECTOR, "[data-test-id='closeModalButton']")
                 close_button.click()
                 time.sleep(1)
-            except:
-                pass
+            except Exception:
+                try:
+                    driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
+                    time.sleep(0.5)
+                except Exception:
+                    pass
         
         # Normal increment after processing a class
         i += 1
