@@ -185,7 +185,7 @@ def save_class_to_db(cls):
     conn.commit()
     conn.close()
 
-def extract_powerzone_classes(driver, max_classes=10, start_date=None, end_date=None):
+def extract_powerzone_classes(driver, max_classes=10, start_date=None, end_date=None, oldest_first=False):
     """
     Extract data from multiple Power Zone classes found in search results.
     Returns a list of class dictionaries.
@@ -195,10 +195,17 @@ def extract_powerzone_classes(driver, max_classes=10, start_date=None, end_date=
         max_classes: Maximum number of classes to extract
         start_date: Start date filter (datetime object or None)
         end_date: End date filter (datetime object or None)
+        oldest_first: If True, sort oldest to newest (efficient for historical scraping)
     """
     try:
         print("[INFO] Navigating to classes page...")
-        driver.get(BASE_URL)
+        # Build URL with sort order
+        url = BASE_URL
+        if oldest_first:
+            url += "?sort=original_air_time&desc=false"
+            print("[INFO] Using oldest-first sort order")
+        
+        driver.get(url)
         time.sleep(3)
     except Exception as e:
         print(f"[ERROR] Could not navigate to classes page: {e}")
@@ -248,32 +255,69 @@ def extract_powerzone_classes(driver, max_classes=10, start_date=None, end_date=
     classes_outside_range = 0
     consecutive_skips = 0
     found_range_start = False  # Track if we've entered the date range
+    skip_increment = 1  # How many tiles to skip during fast-forward
+    stale_element_errors = 0  # Track DOM staleness
+    max_stale_errors = 5  # Stop after this many stale errors
     
-    for i in range(max_classes):
+    # Calculate intelligent skip increment based on:
+    # 1. How many months we need to traverse
+    # 2. The class density of the period we're scrolling through
+    # NOTE: This initial skip is just a first attempt - we'll adjust as we check dates
+    if start_date or end_date:
+        from datetime import datetime
+        now = datetime.now()
+        
+        # Determine which boundary we're skipping past during fast-forward
+        if oldest_first:
+            # Scrolling from oldest, fast-forward BEFORE start_date
+            # So we're skipping from oldest available up to start_date
+            target_date = start_date
+            months_to_skip = abs((target_date.year - 2019) * 12 + target_date.month)  # From 2019 (earliest)
+        else:
+            # Scrolling from newest (default), fast-forward AFTER end_date
+            # So we're skipping from now back to end_date
+            if end_date:
+                months_to_skip = abs((now.year - end_date.year) * 12 + (now.month - end_date.month))
+            else:
+                # No end_date, use start_date
+                months_to_skip = abs((now.year - start_date.year) * 12 + (now.month - start_date.month))
+        
+        # Estimate class density: use current year's density (2024+: ~27/month average)
+        # Skip ~80% of estimated classes to be safe
+        estimated_classes = months_to_skip * 27
+        skip_increment = max(1, int(estimated_classes * 0.8))
+        
+        print(f"[INFO] Estimated {months_to_skip} months to skip (~{estimated_classes} classes)")
+        print(f"[INFO] Using skip increment of {skip_increment} tiles during fast-forward phase")
+    
+    i = 0
+    while i < max_classes:
         try:
             print(f"\n[INFO] Looking for class tile #{i+1}...")
             
-            # Scroll down if needed to load more classes
-            if i > 0 and i % 20 == 0:
-                print(f"[INFO] Scrolling to load more classes...")
-                driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-                time.sleep(2)
-            
-            # Get all class tiles on the page
+            # Get all class tiles currently loaded
             tiles = WebDriverWait(driver, 10).until(
                 EC.presence_of_all_elements_located((By.CSS_SELECTOR, "[data-test-id='videoCell']"))
             )
             
-            if i >= len(tiles):
-                print(f"[INFO] Need to scroll for more classes. Current tiles: {len(tiles)}")
-                # Scroll to bottom to load more
+            # If we need a tile that's not loaded yet, scroll to load more
+            while i >= len(tiles):
+                print(f"[INFO] Need tile #{i+1} but only {len(tiles)} loaded. Scrolling...")
                 driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-                time.sleep(3)
+                time.sleep(2)
+                
                 # Re-fetch tiles
-                tiles = driver.find_elements(By.CSS_SELECTOR, "[data-test-id='videoCell']")
-                if i >= len(tiles):
+                new_tiles = driver.find_elements(By.CSS_SELECTOR, "[data-test-id='videoCell']")
+                if len(new_tiles) == len(tiles):
+                    # No new tiles loaded
                     print(f"[INFO] No more classes available (found {len(tiles)} total)")
                     break
+                tiles = new_tiles
+            
+            if i >= len(tiles):
+                # Still don't have enough tiles
+                print(f"[INFO] Reached end of available classes")
+                break
             
             # Scroll the specific tile into view
             tile = tiles[i]
@@ -290,28 +334,80 @@ def extract_powerzone_classes(driver, max_classes=10, start_date=None, end_date=
                 date_part = date_text.split('@')[0].strip().split()[-1]  # Get "11/25/25"
                 class_date = datetime.strptime(date_part, '%m/%d/%y')
                 
-                # Check if class is after end_date (we haven't reached target range yet)
-                if end_date and class_date > end_date:
-                    print(f"[INFO] Class date {class_date.strftime('%Y-%m-%d')} is after end date, fast-forwarding...")
-                    classes_outside_range += 1
-                    # Don't increment consecutive_skips when we're still fast-forwarding
-                    continue
+                # DYNAMIC SKIP RECALCULATION during fast-forward
+                # If we're not in range yet, recalculate skip based on current position
+                if not found_range_start:
+                    if oldest_first:
+                        # Fast-forwarding before start_date
+                        if start_date and class_date < start_date:
+                            months_remaining = abs((start_date.year - class_date.year) * 12 + (start_date.month - class_date.month))
+                            if months_remaining > 0:
+                                skip_increment = max(1, int(months_remaining * 27 * 0.8))
+                                print(f"[INFO] Class date {class_date.strftime('%Y-%m-%d')} is before start date")
+                                print(f"[INFO] ~{months_remaining} months to go, recalculated skip to {skip_increment} tiles")
+                                classes_outside_range += 1
+                                i += skip_increment
+                                continue
+                    else:
+                        # Fast-forwarding after end_date (default newest->oldest)
+                        if end_date and class_date > end_date:
+                            months_remaining = abs((class_date.year - end_date.year) * 12 + (class_date.month - end_date.month))
+                            if months_remaining > 0:
+                                skip_increment = max(1, int(months_remaining * 27 * 0.8))
+                                print(f"[INFO] Class date {class_date.strftime('%Y-%m-%d')} is after end date")
+                                print(f"[INFO] ~{months_remaining} months to go, recalculated skip to {skip_increment} tiles")
+                                classes_outside_range += 1
+                                i += skip_increment
+                                continue
+                        
+                        # OVERSHOT: We went too far (before start_date in newest->oldest)
+                        if start_date and class_date < start_date:
+                            print(f"[INFO] ⚠️ Overshot! Class date {class_date.strftime('%Y-%m-%d')} is before start date")
+                            print(f"[INFO] Backing up to find range start...")
+                            # Back up by 20 tiles at a time
+                            i = max(0, i - 20)
+                            continue
                 
-                # Check if class is before start_date (we've passed the target range)
+                # Check if we're in the target date range
+                in_range = True
                 if start_date and class_date < start_date:
-                    print(f"[INFO] Class date {class_date.strftime('%Y-%m-%d')} is before start date")
-                    classes_outside_range += 1
-                    consecutive_skips += 1
-                    
-                    # If we previously found classes in range and now hit 10 consecutive older ones, stop
-                    if found_range_start and consecutive_skips >= 10:
-                        print(f"[INFO] Reached 10 consecutive classes before start date (passed the target range), stopping...")
-                        break
+                    in_range = False
+                if end_date and class_date > end_date:
+                    in_range = False
+                
+                # If we just entered the range, mark it and ensure we're at the start
+                if in_range and not found_range_start:
+                    print(f"[INFO] ✓ Entered date range at tile {i}! Date: {class_date.strftime('%Y-%m-%d')}")
+                    found_range_start = True
+                    # Back up by 20 to ensure we catch the very first class in range
+                    i = max(0, i - 20)
+                    print(f"[INFO] Backing up 20 tiles to ensure we catch range start...")
                     continue
                 
-                # We're in the date range!
+                # Now handle based on whether we're in range or not
+                if oldest_first:
+                    if end_date and class_date > end_date:
+                        print(f"[INFO] Class date {class_date.strftime('%Y-%m-%d')} is after end date")
+                        print(f"[INFO] Reached end of date range (oldest-first), stopping...")
+                        break
+                else:
+                    if start_date and class_date < start_date:
+                        print(f"[INFO] Class date {class_date.strftime('%Y-%m-%d')} is before start date")
+                        consecutive_skips += 1
+                        if found_range_start and consecutive_skips >= 10:
+                            print(f"[INFO] Reached 10 consecutive classes before start date, stopping...")
+                            break
+                        i += 1
+                        continue
+                
+                # We're in range and ready to process!
+                if not in_range:
+                    # Should not get here, but just in case
+                    i += 1
+                    continue
+                    
                 found_range_start = True
-                consecutive_skips = 0  # Reset counter
+                consecutive_skips = 0
                 print(f"[INFO] ✓ Class date {class_date.strftime('%Y-%m-%d')} is in range, extracting details...")
                 
             except Exception as e:
@@ -424,7 +520,30 @@ def extract_powerzone_classes(driver, max_classes=10, start_date=None, end_date=
                 print(f"[WARN] Could not close modal: {e}")
             
         except Exception as e:
+            error_msg = str(e)
             print(f"[ERROR] Could not process class tile #{i+1}: {e}")
+            
+            # Check for stale element errors
+            if "stale element" in error_msg.lower() or "stale element reference" in error_msg.lower():
+                stale_element_errors += 1
+                print(f"[WARN] Stale element error detected ({stale_element_errors}/{max_stale_errors})")
+                
+                if stale_element_errors >= max_stale_errors:
+                    print(f"\n{'='*60}")
+                    print(f"[ERROR] Browser DOM has become stale after {i} classes")
+                    print(f"{'='*60}")
+                    print(f"This happens after processing many classes in one session.")
+                    print(f"")
+                    print(f"✅ Successfully saved {len(classes)} classes to database")
+                    print(f"")
+                    print(f"💡 To continue from where you left off, note the last")
+                    print(f"   processed date and adjust your --start-date accordingly.")
+                    print(f"")
+                    print(f"   Or use batch_scrape.py to handle large date ranges")
+                    print(f"   automatically with monthly chunks.")
+                    print(f"{'='*60}")
+                    break
+            
             import traceback
             traceback.print_exc()
             # Try to close modal if it's open
@@ -434,7 +553,9 @@ def extract_powerzone_classes(driver, max_classes=10, start_date=None, end_date=
                 time.sleep(1)
             except:
                 pass
-            continue
+        
+        # Normal increment after processing a class
+        i += 1
     
     return classes
 
@@ -444,6 +565,7 @@ def main():
     parser.add_argument('--end-date', type=str, help='End date (YYYY-MM-DD)')
     parser.add_argument('--max-classes', type=int, default=None, help='Maximum number of classes to scrape (optional, defaults to all classes in date range)')
     parser.add_argument('--headless', action='store_true', help='Run browser in headless mode (faster)')
+    parser.add_argument('--oldest-first', action='store_true', help='Sort oldest to newest (useful for historical scraping)')
     args = parser.parse_args()
     
     # Parse dates
@@ -472,6 +594,15 @@ def main():
             max_classes = 10  # Conservative default when no dates specified
             print(f"[INFO] No date range or max-classes specified, defaulting to {max_classes} classes")
     
+    # Auto-detect sort order for efficiency
+    oldest_first = args.oldest_first
+    if not oldest_first and start_date:
+        # If scraping old classes (before 2023), auto-enable oldest-first
+        # Volume ramped up significantly in 2023 (~25-30 classes/month)
+        if start_date.year < 2023:
+            oldest_first = True
+            print(f"[INFO] Auto-enabling oldest-first sort (scraping pre-2023 classes)")
+    
     load_dotenv()
     email, password = get_credentials()
     driver = None
@@ -482,7 +613,8 @@ def main():
         
         # Extract multiple classes with optional date filters
         classes = extract_powerzone_classes(driver, max_classes=max_classes, 
-                                           start_date=start_date, end_date=end_date)
+                                           start_date=start_date, end_date=end_date,
+                                           oldest_first=oldest_first)
         
         if classes:
             print(f"\n[INFO] Found {len(classes)} classes, saving to database...")

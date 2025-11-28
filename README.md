@@ -1,264 +1,219 @@
 # Pelalytics
 
-A Python script that fetches, analyzes, and programs Peloton workout data. Extract your complete ride history, track FTP progression, and generate personalized 6-8 week training programs with built-in periodization.
-
-## Overview
-
-Pelalytics uses the **peloton_client** library to connect to your Peloton account and retrieve detailed workout data. It automatically:
-- Fetches your complete workout history with rich metrics
-- Extracts detailed performance data (cadence, resistance, output, heart rate)
-- Tracks FTP progression over time
-- Builds training programs with intelligent periodization
-- Stores everything locally for analysis and trending
+A robust Peloton Power Zone class scraper that extracts class metadata including difficulty ratings, instructor names, and dates. Built with Selenium for reliable browser automation and data extraction.
 
 ## Features
 
-- **✅ Complete Data Extraction**: Full workout history with ride details, instructor info, and performance metrics
-- **✅ Detailed Metrics**: Cadence, resistance, output, heart rate, duration, calories
-- **✅ FTP Analysis**: Estimate FTP progression, calculate training zones, analyze intensity
-- **✅ Program Generation**: Create 6-week or 8-week FTP-building programs with periodization
-  - Aerobic base building
-  - Threshold and tempo development
-  - VO2 Max and anaerobic work
-  - Recovery phases
-  - Built-in testing weeks
-- **✅ Data Persistence**: Incremental updates with automatic duplicate detection
-- **✅ Metadata Tracking**: Timestamps for intelligent sync scheduling
+- 🔍 **Filter-based scraping** - Uses Peloton's native filters (no search limitations)
+- 📅 **Date range filtering** - Extract classes from specific time periods
+- 🚀 **Headless mode** - Fast, background scraping without browser UI
+- 💾 **SQLite database** - Automatic deduplication and upsert logic
+- 🎯 **Smart scrolling** - Automatically loads more classes as needed
+- ⚡ **Intelligent skipping** - Fast-forwards through classes outside date range
+- 📊 **Complete metadata** - Title, instructor, duration, difficulty rating, date, URL
 
-## How It Works
+## Quick Start
 
-### Part 1: Data Extraction
-1. **Authenticate** with your Peloton account (uses `peloton_client` library)
-2. **Fetch** all workouts with detailed metrics from your account
-3. **Parse** metrics including power output, cadence, resistance, heart rate
-4. **Merge** with existing data, avoiding duplicates
-5. **Export** to organized CSV files
-
-### Part 2: Analysis & Programming
-1. **Analyze** historical data to estimate current FTP
-2. **Track** FTP progression week-over-week
-3. **Generate** personalized 6 or 8-week training programs
-4. **Structure** programs with smart periodization:
-   - **Weeks 1-2**: Aerobic base building (Z1-Z2)
-   - **Weeks 3-4**: Threshold development (Z3-Z4)
-   - **Weeks 5-6**: Peak power and VO2 max (Z4-Z5)
-   - **Week 7-8**: Taper and testing
-
-## Requirements
-
-- Python 3.x
-- `requests` - HTTP library for API calls
-- `pandas` - Data manipulation and CSV export
-- `peloton_client` - Peloton API wrapper (installed from GitHub)
-
-## Setup
-
-### 1. Create Virtual Environment
+### 1. Install Dependencies
 
 ```bash
 python3 -m venv venv
-```
-
-### 2. Activate Virtual Environment
-
-```bash
-# On macOS/Linux:
-source venv/bin/activate
-
-# On Windows:
-venv\Scripts\activate
-```
-
-### 3. Install Dependencies
-
-```bash
+source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 4. Configure Credentials
+### 2. Configure Credentials
 
-Edit `config.py` with your Peloton login:
-
-```python
-PELOTON_USERNAME = "your_email@example.com"
-PELOTON_PASSWORD = "your_password"
-```
-
-⚠️ **Security Note**: `config.py` is in `.gitignore` - never commit it to version control!
-
-### 5. Run the Script
+Create a `.env` file:
 
 ```bash
-python pelolytics.py
+cp .env.example .env
 ```
 
-## Output Structure
+Edit `.env` with your Peloton credentials:
 
 ```
-output/
-├── workouts.csv              # All workouts with ride/instructor details
-├── workout_metrics.csv       # Detailed metrics (cadence, output, HR, etc.)
-└── .metadata.json            # Internal timestamp tracking
+PELOTON_EMAIL=your_email@example.com
+PELOTON_PASSWORD=your_password
 ```
 
-## Usage Examples
-
-### Fetch All Workout Data
+### 3. Run the Scraper
 
 ```bash
-python pelolytics.py
+# Scrape specific date range (recommended)
+python refresh_cache.py --start-date 2025-11-01 --end-date 2025-11-30 --headless
+
+# Scrape with default limit
+python refresh_cache.py --max-classes 10
+
+# Scrape without headless (see browser)
+python refresh_cache.py --start-date 2024-01-01 --end-date 2024-12-31
 ```
 
-Output:
-- Fetches all workouts from your account
-- Automatically merges with existing data
-- Creates/updates CSV files in `output/` folder
+## Usage
 
-### Analyze Data & Generate Training Program
+### Command-Line Options
 
-```python
-from analysis import FTPAnalyzer, TrainingProgramGenerator
-import pandas as pd
+```bash
+python refresh_cache.py [OPTIONS]
 
-# Load your metrics data
-metrics_df = pd.read_csv('output/workout_metrics.csv')
-
-# Analyze FTP progression
-analyzer = FTPAnalyzer(metrics_df)
-current_ftp = analyzer.get_current_ftp()
-print(f"Current FTP: {current_ftp:.0f}W")
-
-# Generate 8-week training program
-generator = TrainingProgramGenerator(current_ftp, training_level='intermediate')
-program = generator.generate_8_week_periodized(target_ftp_increase=8.0)
-print(program)
-
-# Export program to CSV
-generator.export_program('output/training_program.csv')
+Options:
+  --start-date YYYY-MM-DD    Filter classes from this date (inclusive)
+  --end-date YYYY-MM-DD      Filter classes until this date (inclusive)
+  --max-classes N            Maximum classes to scrape (default: 10 without dates, 10000 with dates)
+  --headless                 Run in headless mode (faster, no browser UI)
 ```
 
-## Data Available
+### Examples
 
-### Workout Summary (`workouts.csv`)
-- Workout ID, date/time, status
-- Duration, fitness discipline (cycling, running, etc.)
-- Total output (watts), distance, calories
-- Instructor details (name, bio, specialties)
-- Ride/class information
-
-### Detailed Metrics (`workout_metrics.csv`)
-- All fields from workouts.csv plus:
-- Performance graph data:
-  - Average/max cadence
-  - Average/max resistance
-  - Average/max output
-  - Average/max heart rate (if available)
-- Segment breakdowns
-- Metric summaries
-
-## Analysis Features
-
-### FTP Tracking
-
-```python
-analyzer = FTPAnalyzer(metrics_df)
-
-# Get FTP progression over time
-ftp_history = analyzer.get_ftp_progression()
-# Returns: DataFrame with weekly estimated FTP
-
-# Get current FTP
-current_ftp = analyzer.get_current_ftp()
-# Returns: Float with estimated FTP
-
-# Get recent intensity distribution
-intensity = analyzer.get_intensity_distribution(weeks=12)
-# Returns: DataFrame with training zone distribution
+**Scrape all of 2024:**
+```bash
+python refresh_cache.py --start-date 2024-01-01 --end-date 2024-12-31 --headless
 ```
 
-### Training Zones
-
-Zones are defined as % of FTP:
-- **Z1** (0-56%): Active Recovery
-- **Z2** (56-76%): Endurance
-- **Z3** (76-90%): Tempo
-- **Z4** (90-105%): Threshold
-- **Z5** (105%+): VO2 Max / Anaerobic
-
-### Program Generation
-
-**6-Week Build Program**:
-```python
-generator = TrainingProgramGenerator(estimated_ftp=200, training_level='intermediate')
-program = generator.generate_6_week_build(target_ftp_increase=5.0)
+**Scrape last 3 months:**
+```bash
+python refresh_cache.py --start-date 2025-08-01 --end-date 2025-10-31 --headless
 ```
 
-**8-Week Periodized Program**:
-```python
-program = generator.generate_8_week_periodized(target_ftp_increase=8.0)
+**Test with 5 classes:**
+```bash
+python refresh_cache.py --max-classes 5
+```
+
+## How It Works
+
+1. **Authenticates** with your Peloton account
+2. **Navigates** to cycling classes page
+3. **Applies filter** for Power Zone classes
+4. **Scrolls and loads** classes from newest to oldest
+5. **Checks dates** on class tiles (without opening modals)
+6. **Skips classes** outside your date range
+7. **Extracts details** for in-range classes:
+   - Opens class modal
+   - Scrapes difficulty rating, instructor, duration
+   - Saves to database
+   - Closes modal
+8. **Stops automatically** when past date range
+
+### Smart Date Handling
+
+- **Fast-forward:** Quickly scrolls past classes newer than end_date
+- **Extract:** Opens and scrapes classes in your date range
+- **Stop:** Exits after 10 consecutive classes before start_date
+
+This makes date-range scraping extremely efficient!
+
+## Database
+
+Data is stored in `peloton_classes.db` (SQLite):
+
+### Schema
+
+```sql
+CREATE TABLE classes (
+    id TEXT PRIMARY KEY,              -- Peloton class ID
+    title TEXT,                       -- "45 min Power Zone Classic Rock Ride"
+    instructor TEXT,                  -- "Matt Wilpers"
+    duration_minutes INTEGER,         -- 45
+    difficulty_rating REAL,           -- 7.9
+    class_type TEXT,                  -- "Power Zone"
+    original_air_time TEXT,           -- "2025-11-25"
+    url TEXT                          -- Full Peloton URL
+)
+```
+
+### Query Database
+
+```bash
+# View all classes
+sqlite3 peloton_classes.db "SELECT * FROM classes;"
+
+# View specific columns
+sqlite3 peloton_classes.db -header -column "SELECT title, instructor, difficulty_rating FROM classes;"
+
+# Count classes by instructor
+sqlite3 peloton_classes.db "SELECT instructor, COUNT(*) FROM classes GROUP BY instructor;"
+
+# Find hardest classes
+sqlite3 peloton_classes.db "SELECT title, difficulty_rating FROM classes ORDER BY difficulty_rating DESC LIMIT 10;"
 ```
 
 ## Troubleshooting
 
-### Authentication Fails
-1. Verify credentials in `config.py` are correct
-2. Ensure your Peloton account is active
-3. Check your internet connection
+### Browser doesn't open in headless mode
+That's expected! Use `--headless` flag for background operation. Remove it to see the browser.
 
-### No Metrics Found
-1. Make sure you have Peloton workouts on your account
-2. Check that the API can access your data
-3. Wait a few minutes and try again
+### Script stops after 10 classes
+Check your date range - the script stops when it passes your start_date. Adjust dates or remove date filters.
 
-### Missing Columns in CSV
-1. Different Peloton equipment may provide different data
-2. Some metrics (HR) require a compatible device
-3. Check the actual column names in the CSV files
+### "Element click intercepted" errors
+The modal didn't close properly. The script has retry logic, but if it persists, try without `--headless`.
+
+### Authentication fails
+1. Verify credentials in `.env`
+2. Make sure your Peloton account is active
+3. Check for typos in email/password
+
+### No classes found
+1. Verify Power Zone filter is working (run without `--headless` to see)
+2. Check date range is valid (end_date should be after start_date)
+3. Ensure you have Power Zone classes in that time period
 
 ## Files
 
-- `pelolytics.py` - Main data extraction script
-- `analysis.py` - FTP analysis and program generation
-- `config.py` - Credentials (add your Peloton login here)
-- `requirements.txt` - Python dependencies
-- `.gitignore` - Keeps sensitive data safe
-- `output/` - Generated data and CSV exports
-- `venv/` - Virtual environment
-- `API_RESEARCH.md` - Technical API details and alternatives
+```
+.
+├── refresh_cache.py          # Main scraper script
+├── peloton_classes.db        # SQLite database (created on first run)
+├── requirements.txt          # Python dependencies
+├── .env                      # Your credentials (not in git)
+├── .env.example             # Template for credentials
+├── .gitignore               # Excludes sensitive files
+├── README.md                # This file
+├── input/                   # Optional input files
+├── output/                  # Optional output exports
+└── legacy/                  # Old code (archived)
+```
 
-## How Data Sync Works
+## Strategy for Complete History
 
-**First Run**:
-- Fetches all historical workouts
-- Creates CSV files in `output/`
-- Records timestamp for next sync
+Since Peloton has years of Power Zone classes, scrape in chunks:
 
-**Subsequent Runs**:
-- Loads existing data from `output/`
-- Only fetches new workouts
-- Automatically merges new data with existing
-- Updates timestamp
+```bash
+# 2025
+python refresh_cache.py --start-date 2025-01-01 --end-date 2025-12-31 --headless
 
-This incremental approach keeps syncs fast and bandwidth-efficient!
+# 2024
+python refresh_cache.py --start-date 2024-01-01 --end-date 2024-12-31 --headless
 
-## Notes & Limitations
+# 2023
+python refresh_cache.py --start-date 2023-01-01 --end-date 2023-12-31 --headless
 
-- **FTP Estimation**: Calculated from weekly average output. For precise FTP, take a formal 20-minute power test
-- **Metrics Availability**: Some metrics (HR) require compatible Peloton equipment
-- **API Dependency**: Uses unofficial/reverse-engineered Peloton API (not officially supported)
-- **Data Privacy**: Keep `config.py` with credentials safe and never commit to version control
+# Continue back as far as needed...
+```
+
+The database automatically handles duplicates, so re-running is safe!
+
+## Security
+
+- `.env` is in `.gitignore` - never committed
+- Database (`*.db`) is in `.gitignore` - stays local
+- Never hardcode credentials in scripts
 
 ## Future Enhancements
 
-- Automated program tracking and adjustment
-- Visual dashboards and charts
-- Integration with Strava/Garmin
-- Historical trend analysis
-- Smart rest day recommendations
-- Instructor and ride filtering/analysis
+- Export to CSV
+- Filter by instructor
+- Track scraping progress
+- Auto-resume on interruption
+- Difficulty trend analysis
+- Training program generator
 
-## References
+## License
 
-- [peloton_client GitHub](https://github.com/kiera-dev/peloton_client)
-- [API Research Details](API_RESEARCH.md)
-- Unofficial Peloton API Spec: https://app.swaggerhub.com/apis/DovOps/peloton-unofficial-api/0.2.3
+MIT License - see LICENSE file
+
+## Acknowledgments
+
+Built with Selenium and ChromeDriver for reliable web scraping.
